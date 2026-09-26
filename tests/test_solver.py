@@ -225,6 +225,84 @@ class ChoiceTest(unittest.TestCase):
         self.assertEqual(result["maxRescueProbability"], F(1))
 
 
+class MutualFeedbackTest(unittest.TestCase):
+    """Two relays feed back into each other and the model keeps retrying.
+
+    start -> A; A stays in A or moves to B with 1/2 each; B returns to A or
+    is rescued with 1/2 each.  Rescue is eventually almost sure, so every
+    state value is exactly 1; a one-pass backward substitution wrongly gives
+    1/2.  All three states can still reach a terminal and must NOT be listed
+    as non-terminating.
+    """
+
+    MODEL = dict(
+        states=["start", "relayA", "relayB", "rescued", "lost"],
+        start="start",
+        rescued=["rescued"],
+        lost=["lost"],
+        actions={
+            "start": {"enter": {"relayA": F(1)}},
+            "relayA": {"relay": {"relayA": F(1, 2), "relayB": F(1, 2)}},
+            "relayB": {"relay": {"relayA": F(1, 2), "rescued": F(1, 2)}},
+        },
+    )
+
+    def setUp(self):
+        self.result = model(**self.MODEL)
+
+    def test_exact_probability_one(self):
+        self.assertEqual(self.result["maxRescueProbability"], F(1))
+        values = self.result["stateValues"]
+        for s in ("start", "relayA", "relayB"):
+            self.assertEqual(values[s], F(1), s)
+        self.assertEqual(values["rescued"], F(1))
+        self.assertEqual(values["lost"], F(0))
+
+    def test_certificates_match_values(self):
+        certs = {c["state"]: c for c in self.result["certificates"]}
+        self.assertEqual(set(certs), {"start", "relayA", "relayB"})
+        for state in ("start", "relayA", "relayB"):
+            cert = certs[state]
+            self.assertEqual(cert["value"], F(1), state)
+            self.assertEqual(len(cert["actions"]), 1)
+            entry = cert["actions"][0]
+            self.assertEqual(entry["expectedValue"], F(1), state)
+            self.assertTrue(entry["optimal"], state)
+            self.assertTrue(entry["selected"], state)
+
+    def test_states_are_terminating(self):
+        # the relays can reach the rescued terminal, so none are non-terminating
+        self.assertEqual(self.result["nonTerminatingStates"], [])
+
+    def test_result_independent_of_entry_order(self):
+        permutations = [
+            ["lost", "relayB", "start", "rescued", "relayA"],
+            ["relayA", "start", "rescued", "relayB", "lost"],
+            ["rescued", "lost", "relayB", "relayA", "start"],
+        ]
+        baseline = {s: self.result["stateValues"][s]
+                    for s in self.MODEL["states"]}
+        for order in permutations:
+            m = dict(self.MODEL)
+            m["states"] = order
+            r = model(**m)
+            self.assertEqual({s: r["stateValues"][s] for s in order}, baseline)
+            self.assertEqual(r["maxRescueProbability"], F(1))
+            self.assertEqual(r["nonTerminatingStates"], [])
+
+    def test_independent_of_distribution_entry_order(self):
+        m = dict(self.MODEL)
+        m["actions"] = {
+            "start": {"enter": {"relayA": F(1)}},
+            "relayA": {"relay": {"relayB": F(1, 2), "relayA": F(1, 2)}},
+            "relayB": {"relay": {"rescued": F(1, 2), "relayA": F(1, 2)}},
+        }
+        r = model(**m)
+        self.assertEqual(r["maxRescueProbability"], F(1))
+        for s in ("start", "relayA", "relayB"):
+            self.assertEqual(r["stateValues"][s], F(1))
+
+
 class NonTerminatingHelperTest(unittest.TestCase):
     def test_pure_graph(self):
         self.assertEqual(

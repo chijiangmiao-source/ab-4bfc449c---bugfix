@@ -189,31 +189,6 @@ def non_terminating_states(states, terminals, actions):
     return sorted(s for s in states if s not in can_reach)
 
 
-def _solve_local_state(state, actions, values):
-    rows = []
-    rhs = []
-    for action_id in sorted(actions[state]):
-        row = [Fraction(1)]
-        required = Fraction(0)
-        for target, probability in actions[state][action_id].items():
-            if target == state:
-                row[0] -= probability
-            else:
-                required += probability * values.get(target, Fraction(0))
-        rows.append(row)
-        rhs.append(required)
-    value = _simplex_min([Fraction(1)], rows, rhs)[0]
-    expectations = {}
-    for action_id in sorted(actions[state]):
-        expected = Fraction(0)
-        for target, probability in actions[state][action_id].items():
-            target_value = value if target == state else values.get(
-                target, Fraction(0))
-            expected += probability * target_value
-        expectations[action_id] = expected
-    return value, expectations
-
-
 def solve_reachability(states, start, rescued, lost, actions):
     """Solve one audit model exactly.
 
@@ -223,6 +198,11 @@ def solve_reachability(states, start, rescued, lost, actions):
     ``lost``     collection of lost terminal identifiers (value 0)
     ``actions``  ``{state: {action: {target: Fraction}}}`` for controllable
                  states only
+
+    All non-terminal state values are solved *together* in one global LP, so
+    mutual feedback (A -> B -> A), direct self loops (A -> A) and lost
+    closed loops are handled exactly and the result is independent of the
+    order in which states, actions or transition entries were recorded.
 
     Returns a dict of exact results (Fractions, not strings):
       ``maxRescueProbability``  value of the start state
@@ -234,22 +214,46 @@ def solve_reachability(states, start, rescued, lost, actions):
     rescued_set = set(rescued)
     lost_set = set(lost)
     terminals = rescued_set | lost_set
+    controllable = [s for s in states if s not in terminals]
+    index = {s: i for i, s in enumerate(controllable)}
+    n = len(controllable)
+
+    # Global least-fixed-point LP over every controllable state at once:
+    #   minimise sum_s v(s)
+    #   s.t.  v(s) >= sum_{s'} p(s,a,s') v(s')   per controllable s, action a
+    #         v(s) >= 0
+    # Terminal successors enter the right-hand side: rescued -> 1, lost -> 0.
+    rows = []
+    rhs = []
+    for s in controllable:
+        for action_id in sorted(actions[s]):
+            row = [Fraction(0)] * n
+            required = Fraction(0)
+            row[index[s]] = Fraction(1)
+            for target, probability in actions[s][action_id].items():
+                if target in rescued_set:
+                    required += probability
+                elif target in lost_set:
+                    pass
+                else:
+                    row[index[target]] -= probability
+            rows.append(row)
+            rhs.append(required)
+
+    solution = _simplex_min([Fraction(1)] * n, rows, rhs)
     values = {s: Fraction(1) for s in rescued}
     values.update({s: Fraction(0) for s in lost})
-    action_expectations = {}
-    for s in reversed(states):
-        if s not in terminals:
-            values[s], action_expectations[s] = _solve_local_state(
-                s, actions, values)
+    for s, x in zip(controllable, solution):
+        values[s] = x
 
     certificates = []
     optimal_actions = {}
-    for s in states:
-        if s in terminals:
-            continue
+    for s in controllable:
         entries = []
         for action_id in sorted(actions[s]):
-            expected = action_expectations[s][action_id]
+            expected = Fraction(0)
+            for target, probability in actions[s][action_id].items():
+                expected += probability * values[target]
             entries.append({
                 "action": action_id,
                 "expectedValue": expected,

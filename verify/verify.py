@@ -9,8 +9,11 @@ Runs three stages and exits non-zero if any of them fails:
                    http://app:8080): health endpoint, exact fraction
                    probabilities (1/3, 2/3, certain rescue), canonical
                    lexicographic action on ties, zero rescue probability and
-                   closed-loop identification, and locatable 400 failures
-                   that must not produce success certificates.
+                   closed-loop identification, mutual-feedback relays whose
+                   almost-sure rescue must stay exactly 1 (with matching
+                   certificates, no non-terminating mislabel and identical
+                   results under entry-order permutations), and locatable
+                   400 failures that must not produce success certificates.
 
 The process exits after the run and prints VERIFY_EXIT_CODE so that
 `docker compose up --exit-code-from verify` (or a shell) can report it.
@@ -198,6 +201,67 @@ def stage_http_smoke():
     check("closed loop identified as non-terminating",
           body.get("nonTerminatingStates") == ["loop1", "loop2", "s0"],
           repr(body.get("nonTerminatingStates")))
+
+    # -- mutual feedback relays: almost-sure rescue must stay exact 1 -------
+    # start -> A; A loops to A/B (1/2 each); B returns to A or is rescued
+    # (1/2 each).  Keeps retrying forever, so rescue is almost sure: a naive
+    # backward pass reports 1/2, the exact least fixed point is 1 everywhere.
+    mutual_model = {
+        "states": ["start", "relayA", "relayB", "rescued", "lost"],
+        "start": "start",
+        "rescuedStates": ["rescued"],
+        "lostStates": ["lost"],
+        "actions": {
+            "start": {"enter": {"relayA": "1"}},
+            "relayA": {"relay": {"relayA": "1/2", "relayB": "1/2"}},
+            "relayB": {"relay": {"relayA": "1/2", "rescued": "1/2"}},
+        },
+    }
+    status, body = http_post(AUDIT_URL, mutual_model)
+    values = body.get("stateValues", {})
+    check("mutual-feedback model HTTP 200", status == 200, "got %s" % status)
+    check("mutual-feedback max rescue probability is exactly 1",
+          body.get("maxRescueProbability") == "1",
+          repr(body.get("maxRescueProbability")))
+    check("mutual-feedback state values are all exactly 1",
+          all(values.get(s) == "1" for s in ("start", "relayA", "relayB")),
+          repr(values))
+    certs = {c.get("state"): c for c in body.get("certificates", [])}
+    cert_ok = all(
+        certs.get(s, {}).get("value") == "1"
+        and len(certs.get(s, {}).get("actions", [])) == 1
+        and certs[s]["actions"][0].get("expectedValue") == "1"
+        and certs[s]["actions"][0].get("optimal") is True
+        and certs[s]["actions"][0].get("selected") is True
+        for s in ("start", "relayA", "relayB"))
+    check("mutual-feedback certificates recompute to 1", cert_ok,
+          json.dumps(body.get("certificates", []))[:300])
+    check("mutual-feedback states are not non-terminating",
+          body.get("nonTerminatingStates") == [],
+          repr(body.get("nonTerminatingStates")))
+
+    # same model with states/actions/distributions entered in another order:
+    # the audit conclusion must be identical
+    reordered = {
+        "states": ["lost", "relayB", "start", "rescued", "relayA"],
+        "start": "start",
+        "rescuedStates": ["rescued"],
+        "lostStates": ["lost"],
+        "actions": {
+            "relayB": {"relay": {"rescued": "1/2", "relayA": "1/2"}},
+            "start": {"enter": {"relayA": "1"}},
+            "relayA": {"relay": {"relayB": "1/2", "relayA": "1/2"}},
+        },
+    }
+    status2, body2 = http_post(AUDIT_URL, reordered)
+    same = (status2 == 200
+            and body2.get("maxRescueProbability")
+            == body.get("maxRescueProbability")
+            and body2.get("stateValues") == body.get("stateValues")
+            and body2.get("nonTerminatingStates")
+            == body.get("nonTerminatingStates"))
+    check("mutual-feedback result independent of entry order", same,
+          json.dumps(body2)[:300])
 
     # -- invalid models: locatable 400, no success certificate --------------
     bad_models = [

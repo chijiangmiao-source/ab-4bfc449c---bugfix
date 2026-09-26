@@ -129,6 +129,58 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(body["stateValues"]["loop2"], "0")
         self.assertEqual(body["nonTerminatingStates"], ["loop1", "loop2", "s0"])
 
+    def test_mutual_feedback_relays_exact_one(self):
+        payload = {
+            "states": ["start", "relayA", "relayB", "rescued", "lost"],
+            "start": "start",
+            "rescuedStates": ["rescued"],
+            "lostStates": ["lost"],
+            "actions": {
+                "start": {"enter": {"relayA": "1"}},
+                "relayA": {"relay": {"relayA": "1/2", "relayB": "1/2"}},
+                "relayB": {"relay": {"relayA": "1/2", "rescued": "1/2"}},
+            },
+        }
+        status, body = post(self.url("/api/reachability-audit"), payload)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["maxRescueProbability"], "1")
+        for s in ("start", "relayA", "relayB"):
+            self.assertEqual(body["stateValues"][s], "1", s)
+        self.assertEqual(body["nonTerminatingStates"], [])
+        certs = {c["state"]: c for c in body["certificates"]}
+        for s in ("start", "relayA", "relayB"):
+            cert = certs[s]
+            self.assertEqual(cert["value"], "1", s)
+            self.assertEqual(len(cert["actions"]), 1)
+            entry = cert["actions"][0]
+            self.assertEqual(entry["expectedValue"], "1", s)
+            self.assertTrue(entry["optimal"])
+            self.assertTrue(entry["selected"])
+        self.assertEqual(body["optimalActions"],
+                         {"start": "enter", "relayA": "relay",
+                          "relayB": "relay"})
+
+    def test_mutual_feedback_order_independent(self):
+        # same model, states and transition entries recorded in another order
+        payload = {
+            "states": ["lost", "relayB", "start", "rescued", "relayA"],
+            "start": "start",
+            "rescuedStates": ["rescued"],
+            "lostStates": ["lost"],
+            "actions": {
+                "relayB": {"relay": {"rescued": "1/2", "relayA": "1/2"}},
+                "start": {"enter": {"relayA": "1"}},
+                "relayA": {"relay": {"relayB": "1/2", "relayA": "1/2"}},
+            },
+        }
+        status, body = post(self.url("/api/reachability-audit"), payload)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["maxRescueProbability"], "1")
+        for s in ("start", "relayA", "relayB"):
+            self.assertEqual(body["stateValues"][s], "1", s)
+        self.assertEqual(body["nonTerminatingStates"], [])
+
     # -- validation failures ----------------------------------------------------
     def assert_failure(self, payload, code, path_prefix=None, raw=None):
         status, body = post(self.url("/api/reachability-audit"), payload,

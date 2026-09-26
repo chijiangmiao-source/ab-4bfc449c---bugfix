@@ -116,7 +116,9 @@ The `verify` service waits for `app` to be healthy, then runs the unit/API
 test suite, a byte-compile/import build check, and live HTTP smoke checks
 (exact `1/3`/`2/3` fractions, certain rescue, canonical lexicographic action
 on ties with equal expected values, zero rescue probability for the closed
-loop and the start state forced into it, and locatable `400` failures). It
+loop and the start state forced into it, mutual-feedback relays whose
+almost-sure rescue must remain exactly `1` regardless of entry order, and
+locatable `400` failures). It
 then exits and reports its exit code:
 
 ```sh
