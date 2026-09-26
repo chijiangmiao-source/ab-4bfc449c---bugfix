@@ -6,7 +6,8 @@ Runs three stages and exits non-zero if any of them fails:
                    certificates, validation failures)
 2. build check  -- every service module byte-compiles and imports cleanly
 3. API/HTTP smoke -- against a live service (BASE_URL, default
-                   http://app:8080): health endpoint, exact fraction
+                   http://app:8080): health endpoint, mutual-feedback
+                   relays rescued with exact probability 1, exact fraction
                    probabilities (1/3, 2/3, certain rescue), canonical
                    lexicographic action on ties, zero rescue probability and
                    closed-loop identification, and locatable 400 failures
@@ -107,6 +108,43 @@ def wait_for_health(attempts=60, delay=1.0):
 def stage_http_smoke():
     print("== stage 3/3: API/HTTP smoke against %s ==" % BASE_URL)
     check("health endpoint reachable", wait_for_health(), HEALTH_URL)
+
+    # -- mutual feedback between relays: exact probability 1 ------------------
+    # s0 commits into relayA; relayA stays or hands over to relayB (1/2 each);
+    # relayB falls back to relayA or completes the rescue (1/2 each).  The
+    # model keeps earning another attempt, so every state value is exactly 1.
+    status, body = http_post(AUDIT_URL, {
+        "states": ["s0", "relayA", "relayB", "rescued", "lost"],
+        "start": "s0",
+        "rescuedStates": ["rescued"],
+        "lostStates": ["lost"],
+        "actions": {
+            "s0": {"commit": {"relayA": "1"}},
+            "relayA": {"retry": {"relayA": "1/2", "relayB": "1/2"}},
+            "relayB": {"retry": {"relayA": "1/2", "rescued": "1/2"}},
+        },
+    })
+    values = body.get("stateValues", {})
+    check("mutual-feedback model HTTP 200", status == 200, "got %s" % status)
+    check("mutual-feedback rescue probability is exactly 1",
+          body.get("maxRescueProbability") == "1",
+          repr(body.get("maxRescueProbability")))
+    check("mutual-feedback relay values are exactly 1",
+          values.get("s0") == "1" and values.get("relayA") == "1"
+          and values.get("relayB") == "1", repr(values))
+    certs = {c.get("state"): c for c in body.get("certificates", [])}
+    cert_ok = all(
+        certs.get(s, {}).get("value") == "1"
+        and len(certs.get(s, {}).get("actions", [])) == 1
+        and certs[s]["actions"][0].get("expectedValue") == "1"
+        and certs[s]["actions"][0].get("optimal") is True
+        and certs[s]["actions"][0].get("selected") is True
+        for s in ("s0", "relayA", "relayB"))
+    check("mutual-feedback certificates match state values", cert_ok,
+          json.dumps(certs)[:200])
+    check("mutual-feedback relays still terminate",
+          body.get("nonTerminatingStates") == [],
+          repr(body.get("nonTerminatingStates")))
 
     # -- certain rescue: exact probability 1 --------------------------------
     status, body = http_post(AUDIT_URL, {

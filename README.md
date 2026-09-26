@@ -114,7 +114,8 @@ curl -s localhost:9000/health                 # health check works
 
 The `verify` service waits for `app` to be healthy, then runs the unit/API
 test suite, a byte-compile/import build check, and live HTTP smoke checks
-(exact `1/3`/`2/3` fractions, certain rescue, canonical lexicographic action
+(mutual-feedback relays rescued with exact probability `1`, exact
+`1/3`/`2/3` fractions, certain rescue, canonical lexicographic action
 on ties with equal expected values, zero rescue probability for the closed
 loop and the start state forced into it, and locatable `400` failures). It
 then exits and reports its exit code:

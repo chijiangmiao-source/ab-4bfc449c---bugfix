@@ -129,6 +129,73 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(body["stateValues"]["loop2"], "0")
         self.assertEqual(body["nonTerminatingStates"], ["loop1", "loop2", "s0"])
 
+    # -- mutual feedback between relays ---------------------------------------
+    def mutual_feedback_payload(self, states=None, actions=None):
+        return {
+            "states": states or ["s0", "relayA", "relayB", "rescued", "lost"],
+            "start": "s0",
+            "rescuedStates": ["rescued"],
+            "lostStates": ["lost"],
+            "actions": actions or {
+                "s0": {"commit": {"relayA": "1"}},
+                "relayA": {"retry": {"relayA": "1/2", "relayB": "1/2"}},
+                "relayB": {"retry": {"relayA": "1/2", "rescued": "1/2"}},
+            },
+        }
+
+    def test_mutual_feedback_exact_one(self):
+        status, body = post(self.url("/api/reachability-audit"),
+                            self.mutual_feedback_payload())
+        self.assertEqual(status, 200)
+        self.assertTrue(body["ok"])
+        # repeated attempts rescue with exact probability 1, never 1/2
+        self.assertEqual(body["maxRescueProbability"], "1")
+        for s in ("s0", "relayA", "relayB", "rescued"):
+            self.assertEqual(body["stateValues"][s], "1")
+        self.assertEqual(body["stateValues"]["lost"], "0")
+        # certificates: every relay's expected value matches its state value
+        certs = {c["state"]: c for c in body["certificates"]}
+        for s, action in (("s0", "commit"), ("relayA", "retry"),
+                          ("relayB", "retry")):
+            cert = certs[s]
+            self.assertEqual(cert["value"], "1")
+            self.assertEqual(cert["selectedAction"], action)
+            (entry,) = cert["actions"]
+            self.assertEqual(entry["expectedValue"], "1")
+            self.assertTrue(entry["optimal"])
+            self.assertTrue(entry["selected"])
+        self.assertEqual(body["optimalActions"],
+                         {"s0": "commit", "relayA": "retry",
+                          "relayB": "retry"})
+        # relays can still reach a terminal: not non-terminating
+        self.assertEqual(body["nonTerminatingStates"], [])
+
+    def test_mutual_feedback_order_irrelevant(self):
+        _, reference = post(self.url("/api/reachability-audit"),
+                            self.mutual_feedback_payload())
+        variants = [
+            self.mutual_feedback_payload(
+                states=["lost", "rescued", "relayB", "relayA", "s0"]),
+            self.mutual_feedback_payload(actions={
+                "relayB": {"retry": {"rescued": "1/2", "relayA": "1/2"}},
+                "s0": {"commit": {"relayA": "1"}},
+                "relayA": {"retry": {"relayB": "1/2", "relayA": "1/2"}},
+            }),
+        ]
+        ref_certs = {c["state"]: c for c in reference["certificates"]}
+        for payload in variants:
+            status, body = post(self.url("/api/reachability-audit"), payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(body["stateValues"], reference["stateValues"])
+            self.assertEqual(body["maxRescueProbability"],
+                             reference["maxRescueProbability"])
+            self.assertEqual(body["optimalActions"],
+                             reference["optimalActions"])
+            self.assertEqual(body["nonTerminatingStates"],
+                             reference["nonTerminatingStates"])
+            got_certs = {c["state"]: c for c in body["certificates"]}
+            self.assertEqual(got_certs, ref_certs)
+
     # -- validation failures ----------------------------------------------------
     def assert_failure(self, payload, code, path_prefix=None, raw=None):
         status, body = post(self.url("/api/reachability-audit"), payload,
